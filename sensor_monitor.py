@@ -1,0 +1,288 @@
+import struct
+import sys
+import time
+import csv
+import os
+from collections import deque
+from datetime import datetime
+import argparse
+
+from rich.console import Console
+from rich.table import Table
+from rich.live import Live
+
+import serial
+
+# Константы для протокола DORIENT
+HEADER = bytes([0x0D, 0x0A, 0x7E])
+DORIENT_ID = 0x70
+DORIENT_DATA_LEN = 18
+
+# Количество пакетов для усреднения
+FREQ_WINDOW = 20  
+
+
+class FrequencyEstimator:
+    """Класс для оценки частоты поступления пакетов 
+    на основе скользящего окна последних временных меток."""
+    def __init__(self, window: int = FREQ_WINDOW):
+        self.timestamps = deque(maxlen=window)
+
+    def tick(self) -> None:
+        self.timestamps.append(time.monotonic())
+
+    def hz(self) -> float:
+        if len(self.timestamps) < 2:
+            return 0.0
+        span = self.timestamps[-1] - self.timestamps[0]
+        if span <= 0:
+            return 0.0
+        return (len(self.timestamps) - 1) / span
+
+    def interval_ms(self) -> float:
+        hz = self.hz()
+        return (1000.0 / hz) if hz > 0 else 0.0
+
+
+class DataLogger:
+    """ Класс сохранения данных в файл CSV. 
+    Принимает словарь с данными, дополняет его временной меткой и сохраняет в файл."""
+    
+    COLUMNS = ["timestamp", "heading", "pitch", "roll", "CH", "BH", "ZH", "C", "B", "Z"]
+
+    def __init__(self, path: str):
+        self.path = path
+        self._file = open(path, "w", newline="", encoding="utf-8")
+        self._writer = csv.DictWriter(self._file, fieldnames=self.COLUMNS)
+        self._writer.writeheader()
+        self._file.flush()
+        self.count = 0
+
+    def write(self, parsed: dict) -> None:
+        row = {
+            "timestamp": datetime.now().isoformat(timespec="milliseconds"),
+            "heading": round(parsed["azimuth_deg"], 1),
+            "pitch": round(parsed["pitch_deg"], 2),
+            "roll": round(parsed["roll_deg"], 2),
+            "CH": round(parsed["acc_right"], 2),
+            "BH": round(parsed["acc_fwd"], 2),
+            "ZH": round(parsed["acc_up"], 2),
+            "C": round(parsed["mag_right"], 2),
+            "B": round(parsed["mag_fwd"], 2),
+            "Z": round(parsed["mag_up"], 2),
+        }
+        self._writer.writerow(row)
+        self._file.flush()
+        self.count += 1
+
+    def close(self) -> None:
+        self._file.close()
+
+
+def kang_to_degrees(raw: int, signed: bool = False) -> float:
+    """Преобразует 16-битное значение из датчика в градусы."""
+    if signed:
+        if raw > 32767:
+            raw -= 65536
+        return raw * 360.0 / 65536.0
+    else:
+        return (raw & 0xFFFF) * 360.0 / 65536.0
+
+
+def int16_to_utesla(value: int) -> float:
+    return value / 75.0
+
+
+def parse_dorient(data: bytes) -> dict:
+    (   roll_raw,
+        pitch_raw,
+        az_raw,
+        acc_right,
+        acc_fwd,
+        acc_up,
+        mag_right,
+        mag_fwd,
+        mag_up,
+    ) = struct.unpack_from("<hhhhhhhhh", data)
+
+    return {
+        "roll_deg": kang_to_degrees(roll_raw, signed=True),
+        "pitch_deg": kang_to_degrees(pitch_raw, signed=True),
+        "azimuth_deg": kang_to_degrees(az_raw, signed=False),
+        "acc_right": int16_to_utesla(acc_right),
+        "acc_fwd": int16_to_utesla(acc_fwd),
+        "acc_up": int16_to_utesla(acc_up),
+        "mag_right": int16_to_utesla(mag_right),
+        "mag_fwd": int16_to_utesla(mag_fwd),
+        "mag_up": int16_to_utesla(mag_up),
+    }
+
+
+def verify_checksum(packet: bytes) -> bool:
+    """Проверяет контрольную сумму пакета."""
+    return (sum(packet[:-1]) & 0xFF) == packet[-1]
+
+
+def find_and_read_packet(ser: serial.Serial, verify_enable : bool = False) -> bytes | None:
+    """Считывает данные из последовательного порта, ищет заголовок и возвращает полный пакет DORIENT."""
+    buf = bytearray()
+
+    # Ищем заголовок 0x0D 0x0A 0x7E
+    while True:
+        byte = ser.read(1)
+        if not byte:
+            return None
+        buf += byte
+        if len(buf) >= 3 and buf[-3:] == HEADER:
+            break
+
+    # После заголовка должны идти ID пакета и длина данных
+    pkt_id_b = ser.read(1)
+    count_b = ser.read(1)
+    if not pkt_id_b or not count_b:
+        return None
+
+    # Извлекаем ID и длину данных
+    pkt_id = pkt_id_b[0]
+    count = count_b[0]
+
+    # Читаем оставшуюся часть пакета (данные + контрольная сумма)
+    remainder = ser.read(count + 1)
+    if len(remainder) < count + 1:
+        return None
+
+    full_packet = HEADER + bytes([pkt_id, count]) + remainder
+
+    if pkt_id != DORIENT_ID:
+        return None 
+
+    if count != DORIENT_DATA_LEN:
+        print(f"[Warning] : {count} (ожидаем {DORIENT_DATA_LEN})")
+        return None
+
+    # Проверка контрольной суммы отключена, так как некоторые устройства могут её не использовать или считать неправильно.
+    if verify_enable and not verify_checksum(full_packet):
+        print("[WARN] Ошибка контрольной суммы (пакет проигнорирован)")
+        return None
+
+    return full_packet
+
+
+def create_table(
+    d: dict, freq: FrequencyEstimator, logger: DataLogger | None, total: int, errors: int
+) -> Table:
+    table = Table(title="Magnetic sensor data monitor")
+
+    table.add_column("Parameter", style="cyan", width=14)
+    table.add_column("Value", justify="center", width=18)
+    table.add_column("Unit", style="dim", width=6)
+
+    log_info = f"{logger.path}  ({logger.count} rows)" if logger else "disabled"
+
+    table.add_row("Heading", f"{d['azimuth_deg']:>8.2f}", "degree")
+    table.add_row("Pitch", f"{d['pitch_deg']:>+8.2f}", "degree")
+    table.add_row("Roll", f"{d['roll_deg']:>+8.2f}", "degree")
+    table.add_row("MagC H", f"{d['acc_right']:>+8.2f}", "uT")
+    table.add_row("MagB H", f"{d['acc_fwd']:>+8.2f}", "uT")
+    table.add_row("MagZ H", f"{d['acc_up']:>+8.2f}", "uT")
+    table.add_row("MagC", f"{d['mag_right']:>+8.2f}", "uT")
+    table.add_row("MagB", f"{d['mag_fwd']:>+8.2f}", "uT")
+    table.add_row("MagZ", f"{d['mag_up']:>+8.2f}", "uT")
+    table.add_section()
+    table.add_row("Freq", f"{freq.hz():>8.2f}", "Hz")
+    table.add_row("Interval", f"{freq.interval_ms():>8.1f}", "ms")
+    table.add_section()
+    table.add_row("Packets", f"{total:<10d}", "")
+    table.add_row("Errors", f"{errors:<6d}", "")
+    table.add_section()
+    table.add_row("Log Info", log_info, "")
+
+    return table
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Magnetic sensor data monitor with console output and optional CSV logging",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("port", help="Serial port  (e.g. COM3 or /dev/ttyUSB0)")
+    parser.add_argument("-b", "--baud", type=int, default=9600, help="Baud rate")
+    parser.add_argument(
+        "-l",
+        "--log",
+        metavar="FILE",
+        help="CSV log file path  (logging disabled if omitted)",
+    )
+    
+    parser.add_argument(
+        "-w",
+        "--window",
+        type=int,
+        default=FREQ_WINDOW,
+        help="Sliding window size for frequency estimation",
+    )
+    
+    args = parser.parse_args()
+
+    # Если указанный путь для логирования является директорией, создаем файл с уникальным именем внутри этой директории
+    log_path = args.log
+    print(f"Initial log path: {log_path}", os.path.isdir(log_path))
+    if log_path and os.path.isdir(log_path):
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_path = os.path.join(log_path, f"magsensor_{ts}.csv")
+        print("[INFO] Log path is a directory, will create log file:", log_path)
+
+    print(f"Opening {args.port} at {args.baud} baud …")
+    try:
+        ser = serial.Serial(
+            port=args.port,
+            baudrate=args.baud,
+            bytesize=serial.EIGHTBITS,
+            parity=serial.PARITY_NONE,
+            stopbits=serial.STOPBITS_ONE,
+            timeout=1.0,
+        )
+    except serial.SerialException as e:
+        print(f"[ERROR] Cannot open port: {e}")
+        sys.exit(1)
+
+    logger = None
+    if log_path:
+        logger = DataLogger(log_path)
+        print(f"Logging to: {log_path}")
+
+    freq = FrequencyEstimator(window=args.window)
+    total = 0
+    errors = 0
+
+    print("Listening for DORIENT packets … (Ctrl+C to quit)\n")
+
+    try:
+        with Live(console=Console(), refresh_per_second=10, screen=False) as live:
+            while True:
+                packet = find_and_read_packet(ser)
+                if packet is None:
+                    errors += 1
+                    continue
+                total += 1
+                freq.tick()
+                
+                data = packet[5:-1]
+                parsed = parse_dorient(data)
+
+                if logger:
+                    logger.write(parsed)
+
+                live.update(create_table(parsed, freq, logger, total, errors))
+
+    except KeyboardInterrupt:
+        print("\nStopped by user.")
+    finally:
+        ser.close()
+        if logger:
+            logger.close()
+            print(f"Log saved → {logger.path}  ({logger.count} rows)")
+
+
+if __name__ == "__main__":
+    main()
