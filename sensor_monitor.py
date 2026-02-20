@@ -93,6 +93,19 @@ def kang_to_degrees(raw: int, signed: bool = False) -> float:
 def int16_to_utesla(value: int) -> float:
     return value / 75.0
 
+def fake_parse_dorient() -> dict:
+    """Фейковый парсер для тестирования интерфейса без реального устройства."""
+    return {
+        "roll_deg": 10.0,
+        "pitch_deg": -5.0,
+        "azimuth_deg": 123.4,
+        "acc_right": 50.0,
+        "acc_fwd": -30.0,
+        "acc_up": 20.0,
+        "mag_right": 100.0,
+        "mag_fwd": -80.0,
+        "mag_up": 60.0,
+    }
 
 def parse_dorient(data: bytes, verify_enable: bool = False) -> dict:
     (   roll_raw,
@@ -105,6 +118,8 @@ def parse_dorient(data: bytes, verify_enable: bool = False) -> dict:
         mag_fwd,
         mag_up,
     ) = struct.unpack_from("<hhhhhhhhh", data)
+
+    
 
     return {
         "roll_deg": kang_to_degrees(roll_raw, signed=True),
@@ -122,6 +137,27 @@ def parse_dorient(data: bytes, verify_enable: bool = False) -> dict:
 def verify_checksum(packet: bytes) -> bool:
     """Проверяет контрольную сумму пакета."""
     return (sum(packet[:-1]) & 0xFF) == packet[-1]
+
+def fake_find_and_read_packet() -> bytes:
+    """Фейковая функция для тестирования интерфейса без реального устройства."""
+    time.sleep(0.1)  # имитируем задержку между пакетами
+    data = struct.pack(
+        "<hhhhhhhhh",
+        1000,   # roll_raw
+        -500,   # pitch_raw
+        20000,  # az_raw
+        3750,   # acc_right (50 uT)
+        -2250,  # acc_fwd (-30 uT)
+        1500,   # acc_up (20 uT)
+        7500,   # mag_right (100 uT)
+        -6000,  # mag_fwd (-80 uT)
+        4500,   # mag_up (60 uT)
+    )
+    pkt_id = DORIENT_ID
+    count = DORIENT_DATA_LEN
+    packet = HEADER + bytes([pkt_id, count]) + data
+    checksum = sum(packet) & 0xFF
+    return packet + bytes([checksum])
 
 
 def find_and_read_packet(ser: serial.Serial, verify_enable : bool = False) -> bytes | None:
@@ -280,16 +316,19 @@ def main():
     try:
         with Live(console=Console(), refresh_per_second=10, screen=False) as live:
             while True:
-                packet = find_and_read_packet(ser)
+                #packet = find_and_read_packet(ser)
+                packet = fake_find_and_read_packet()
                 if packet is None:
                     errors += 1
                     continue
+          
                 total += 1
                 freq.tick()
                 
                 data = packet[5:-1]
-                parsed = parse_dorient(data, verify_enable=args.verify)
-
+                
+                #parsed = parse_dorient(data, verify_enable=args.verify)
+                parsed = fake_parse_dorient()
                 if logger:
                     logger.write(parsed)
 

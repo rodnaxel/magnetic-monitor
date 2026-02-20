@@ -43,7 +43,7 @@ uv run sensor_monitor.py COM3 --log session.csv
 uv run sensor_monitor.py /dev/ttyUSB0 --log ./logs/
 
 # Все параметры
-uv run sensor_monitor.py COM3 --baud 19200 --log data.csv --window 30
+uv run sensor_monitor.py COM3 --baud 19200 --log data.csv --window 30 --verify
 ```
 
 ## Параметры
@@ -54,6 +54,7 @@ uv run sensor_monitor.py COM3 --baud 19200 --log data.csv --window 30
 | `-b`, `--baud` | `9600` | Скорость соединения |
 | `-l`, `--log` | — | Путь к CSV-файлу лога |
 | `-w`, `--window` | `20` | Размер окна для расчёта частоты |
+| `-w`, `--verify` | - | Выполнять проверку контрольной суммы |
 
 
 ## Сборка исполняемого файла с помощью PyInstaller
