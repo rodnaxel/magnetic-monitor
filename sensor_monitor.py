@@ -7,8 +7,9 @@ from collections import deque
 from datetime import datetime
 import argparse
 
-from rich.console import Console
+from rich.console import Console, Group 
 from rich.table import Table
+from rich.text import Text
 from rich.live import Live
 
 import serial
@@ -93,7 +94,7 @@ def int16_to_utesla(value: int) -> float:
     return value / 75.0
 
 
-def parse_dorient(data: bytes) -> dict:
+def parse_dorient(data: bytes, verify_enable: bool = False) -> dict:
     (   roll_raw,
         pitch_raw,
         az_raw,
@@ -173,31 +174,46 @@ def create_table(
 ) -> Table:
     table = Table(title="Magnetic sensor data monitor")
 
-    table.add_column("Parameter", style="cyan", width=14)
-    table.add_column("Value", justify="center", width=18)
-    table.add_column("Unit", style="dim", width=6)
+    table.add_column("Parameter", justify="left", style="cyan", width=12)
+    table.add_column("Value", justify="center", width=12)
+    table.add_column("Unit", justify="center",style="dim", width=5)
 
-    log_info = f"{logger.path}  ({logger.count} rows)" if logger else "disabled"
-
-    table.add_row("Heading", f"{d['azimuth_deg']:>8.2f}", "degree")
-    table.add_row("Pitch", f"{d['pitch_deg']:>+8.2f}", "degree")
-    table.add_row("Roll", f"{d['roll_deg']:>+8.2f}", "degree")
-    table.add_row("MagC H", f"{d['acc_right']:>+8.2f}", "uT")
-    table.add_row("MagB H", f"{d['acc_fwd']:>+8.2f}", "uT")
-    table.add_row("MagZ H", f"{d['acc_up']:>+8.2f}", "uT")
-    table.add_row("MagC", f"{d['mag_right']:>+8.2f}", "uT")
-    table.add_row("MagB", f"{d['mag_fwd']:>+8.2f}", "uT")
-    table.add_row("MagZ", f"{d['mag_up']:>+8.2f}", "uT")
+    table.add_row("Heading", f"{d['azimuth_deg']:>8.2f}", "deg")
+    table.add_row("Pitch", f"{d['pitch_deg']:>+8.2f}", "deg")
+    table.add_row("Roll", f"{d['roll_deg']:>+8.2f}", "deg")
+    table.add_section()
+    table.add_row("Mag C (H)", f"{d['acc_right']:>+8.2f}", "uT")
+    table.add_row("Mag B (H)", f"{d['acc_fwd']:>+8.2f}", "uT")
+    table.add_row("Mag Z (H)", f"{d['acc_up']:>+8.2f}", "uT")
+    table.add_section()
+    table.add_row("Mag C", f"{d['mag_right']:>+8.2f}", "uT")
+    table.add_row("Mag B", f"{d['mag_fwd']:>+8.2f}", "uT")
+    table.add_row("Mag Z", f"{d['mag_up']:>+8.2f}", "uT")
     table.add_section()
     table.add_row("Freq", f"{freq.hz():>8.2f}", "Hz")
     table.add_row("Interval", f"{freq.interval_ms():>8.1f}", "ms")
     table.add_section()
     table.add_row("Packets", f"{total:<10d}", "")
     table.add_row("Errors", f"{errors:<6d}", "")
-    table.add_section()
-    table.add_row("Log Info", log_info, "")
 
     return table
+
+
+def create_log_line(logger: DataLogger | None) -> Text:
+    if logger:
+        text = Text()
+        text.append("  Log: ", style="dim")
+        text.append(logger.path, style="cyan")
+        text.append(f"  ({logger.count} rows)", style="dim")
+    else:
+        text = Text("  Log: disabled", style="dim")
+    return text
+
+
+def create_renderable(d: dict, freq: FrequencyEstimator, logger: DataLogger | None, total: int, errors: int) -> Group:
+    table = create_table(d, freq, logger, total, errors)
+    log_line = create_log_line(logger)
+    return Group(table, log_line)   
 
 
 def main():
@@ -221,12 +237,16 @@ def main():
         default=FREQ_WINDOW,
         help="Sliding window size for frequency estimation",
     )
+    parser.add_argument(
+        "--verify",
+        action="store_true",
+        help="Enable checksum verification (may cause packet drops if device doesn't use correct checksums)",
+    )   
     
     args = parser.parse_args()
 
     # Если указанный путь для логирования является директорией, создаем файл с уникальным именем внутри этой директории
     log_path = args.log
-    print(f"Initial log path: {log_path}", os.path.isdir(log_path))
     if log_path and os.path.isdir(log_path):
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         log_path = os.path.join(log_path, f"magsensor_{ts}.csv")
@@ -268,12 +288,12 @@ def main():
                 freq.tick()
                 
                 data = packet[5:-1]
-                parsed = parse_dorient(data)
+                parsed = parse_dorient(data, verify_enable=args.verify)
 
                 if logger:
                     logger.write(parsed)
 
-                live.update(create_table(parsed, freq, logger, total, errors))
+                live.update(create_renderable(parsed, freq, logger, total, errors))
 
     except KeyboardInterrupt:
         print("\nStopped by user.")
