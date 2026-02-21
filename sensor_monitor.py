@@ -7,12 +7,15 @@ from collections import deque
 from datetime import datetime
 import argparse
 
-from rich.console import Console, Group 
+from rich import print
+from rich.console import Console, Group
 from rich.table import Table
 from rich.text import Text
 from rich.live import Live
 
 import serial
+from serial.tools.list_ports import comports
+
 
 # Константы для протокола DORIENT
 HEADER = bytes([0x0D, 0x0A, 0x7E])
@@ -20,12 +23,13 @@ DORIENT_ID = 0x70
 DORIENT_DATA_LEN = 18
 
 # Количество пакетов для усреднения
-FREQ_WINDOW = 20  
+FREQ_WINDOW = 20
 
 
 class FrequencyEstimator:
-    """Класс для оценки частоты поступления пакетов 
+    """Класс для оценки частоты поступления пакетов
     на основе скользящего окна последних временных меток."""
+
     def __init__(self, window: int = FREQ_WINDOW):
         self.timestamps = deque(maxlen=window)
 
@@ -46,9 +50,9 @@ class FrequencyEstimator:
 
 
 class DataLogger:
-    """ Класс сохранения данных в файл CSV. 
+    """Класс сохранения данных в файл CSV.
     Принимает словарь с данными, дополняет его временной меткой и сохраняет в файл."""
-    
+
     COLUMNS = ["timestamp", "heading", "pitch", "roll", "CH", "BH", "ZH", "C", "B", "Z"]
 
     def __init__(self, path: str):
@@ -93,22 +97,10 @@ def kang_to_degrees(raw: int, signed: bool = False) -> float:
 def int16_to_utesla(value: int) -> float:
     return value / 75.0
 
-def fake_parse_dorient() -> dict:
-    """Фейковый парсер для тестирования интерфейса без реального устройства."""
-    return {
-        "roll_deg": 10.0,
-        "pitch_deg": -5.0,
-        "azimuth_deg": 123.4,
-        "acc_right": 50.0,
-        "acc_fwd": -30.0,
-        "acc_up": 20.0,
-        "mag_right": 100.0,
-        "mag_fwd": -80.0,
-        "mag_up": 60.0,
-    }
 
 def parse_dorient(data: bytes, verify_enable: bool = False) -> dict:
-    (   roll_raw,
+    (
+        roll_raw,
         pitch_raw,
         az_raw,
         acc_right,
@@ -118,8 +110,6 @@ def parse_dorient(data: bytes, verify_enable: bool = False) -> dict:
         mag_fwd,
         mag_up,
     ) = struct.unpack_from("<hhhhhhhhh", data)
-
-    
 
     return {
         "roll_deg": kang_to_degrees(roll_raw, signed=True),
@@ -138,20 +128,21 @@ def verify_checksum(packet: bytes) -> bool:
     """Проверяет контрольную сумму пакета."""
     return (sum(packet[:-1]) & 0xFF) == packet[-1]
 
-def fake_find_and_read_packet() -> bytes:
+
+def fake_find_and_read_packet(ser: serial.Serial, verify_enable: bool = False) -> bytes:
     """Фейковая функция для тестирования интерфейса без реального устройства."""
     time.sleep(0.1)  # имитируем задержку между пакетами
     data = struct.pack(
         "<hhhhhhhhh",
-        1000,   # roll_raw
-        -500,   # pitch_raw
+        1000,  # roll_raw
+        -500,  # pitch_raw
         20000,  # az_raw
-        3750,   # acc_right (50 uT)
+        3750,  # acc_right (50 uT)
         -2250,  # acc_fwd (-30 uT)
-        1500,   # acc_up (20 uT)
-        7500,   # mag_right (100 uT)
+        1500,  # acc_up (20 uT)
+        7500,  # mag_right (100 uT)
         -6000,  # mag_fwd (-80 uT)
-        4500,   # mag_up (60 uT)
+        4500,  # mag_up (60 uT)
     )
     pkt_id = DORIENT_ID
     count = DORIENT_DATA_LEN
@@ -160,7 +151,9 @@ def fake_find_and_read_packet() -> bytes:
     return packet + bytes([checksum])
 
 
-def find_and_read_packet(ser: serial.Serial, verify_enable : bool = False) -> bytes | None:
+def find_and_read_packet(
+    ser: serial.Serial, verify_enable: bool = False
+) -> bytes | None:
     """Считывает данные из последовательного порта, ищет заголовок и возвращает полный пакет DORIENT."""
     buf = bytearray()
 
@@ -191,7 +184,7 @@ def find_and_read_packet(ser: serial.Serial, verify_enable : bool = False) -> by
     full_packet = HEADER + bytes([pkt_id, count]) + remainder
 
     if pkt_id != DORIENT_ID:
-        return None 
+        return None
 
     if count != DORIENT_DATA_LEN:
         print(f"[Warning] : {count} (ожидаем {DORIENT_DATA_LEN})")
@@ -205,14 +198,39 @@ def find_and_read_packet(ser: serial.Serial, verify_enable : bool = False) -> by
     return full_packet
 
 
+def show_available_ports() -> None:
+    console = Console()
+    
+    if not (serial_ports := list(comports())):
+        console.print("No serial ports found.", style="bold red")
+        return
+    
+    table = Table(title="Available Serial Ports")
+    table.add_column("Port", style="cyan", width=10, no_wrap=True)
+    table.add_column("Description", width=30, style="magenta")
+    table.add_column("HWID", width=25, style="green")
+    table.add_column("Manufacturer", width=20, style="yellow")
+
+    for port in serial_ports:
+        table.add_row(
+            port.device, port.description, port.hwid, port.manufacturer or "N/A"
+        )
+        
+    console.print(table)
+
+
 def create_table(
-    d: dict, freq: FrequencyEstimator, logger: DataLogger | None, total: int, errors: int
+    d: dict,
+    freq: FrequencyEstimator,
+    logger: DataLogger | None,
+    total: int,
+    errors: int,
 ) -> Table:
     table = Table(title="Magnetic sensor data monitor")
 
     table.add_column("Parameter", justify="left", style="cyan", width=12)
     table.add_column("Value", justify="center", width=12)
-    table.add_column("Unit", justify="center",style="dim", width=5)
+    table.add_column("Unit", justify="center", style="dim", width=5)
 
     table.add_row("Heading", f"{d['azimuth_deg']:>8.2f}", "deg")
     table.add_row("Pitch", f"{d['pitch_deg']:>+8.2f}", "deg")
@@ -246,13 +264,20 @@ def create_log_line(logger: DataLogger | None) -> Text:
     return text
 
 
-def create_renderable(d: dict, freq: FrequencyEstimator, logger: DataLogger | None, total: int, errors: int) -> Group:
+def create_renderable(
+    d: dict,
+    freq: FrequencyEstimator,
+    logger: DataLogger | None,
+    total: int,
+    errors: int,
+) -> Group:
     table = create_table(d, freq, logger, total, errors)
     log_line = create_log_line(logger)
-    return Group(table, log_line)   
+    return Group(table, log_line)
 
 
-def main():
+def get_args() -> argparse.Namespace:
+    """Парсит аргументы командной строки и возвращает их в виде объекта."""
     parser = argparse.ArgumentParser(
         description="Magnetic sensor data monitor with console output and optional CSV logging",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -265,7 +290,6 @@ def main():
         metavar="FILE",
         help="CSV log file path  (logging disabled if omitted)",
     )
-    
     parser.add_argument(
         "-w",
         "--window",
@@ -277,17 +301,28 @@ def main():
         "--verify",
         action="store_true",
         help="Enable checksum verification (may cause packet drops if device doesn't use correct checksums)",
-    )   
-    
-    args = parser.parse_args()
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug output",
+    )
+    return parser.parse_args()
 
-    # Если указанный путь для логирования является директорией, создаем файл с уникальным именем внутри этой директории
+
+def main():
+    args = get_args()
+
+    # Если указанный путь для логирования является директорией, 
+    # создаем файл с уникальным именем внутри этой директории
     log_path = args.log
     if log_path and os.path.isdir(log_path):
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         log_path = os.path.join(log_path, f"magsensor_{ts}.csv")
         print("[INFO] Log path is a directory, will create log file:", log_path)
 
+    # Открываем последовательный порт
+    # если не удается открыть, выводим ошибку и список доступных портов и выходим
     print(f"Opening {args.port} at {args.baud} baud …")
     try:
         ser = serial.Serial(
@@ -299,36 +334,46 @@ def main():
             timeout=1.0,
         )
     except serial.SerialException as e:
-        print(f"[ERROR] Cannot open port: {e}")
+        print(f"[red bold][ERROR][/] Cannot open port: {e}")
+        show_available_ports()
         sys.exit(1)
 
+    # Инициализируем логгер, если указано
     logger = None
     if log_path:
         logger = DataLogger(log_path)
         print(f"Logging to: {log_path}")
 
+    # Инициализируем оценщик частоты и счетчики пакетов и ошибок
     freq = FrequencyEstimator(window=args.window)
     total = 0
     errors = 0
 
+    # Основной цикл чтения данных и обновления интерфейса
     print("Listening for DORIENT packets … (Ctrl+C to quit)\n")
+
+    if args.debug:
+        print("[red bold][DEBUG MODE ENABLED] Using fake data generator instead of serial input.\n")
+        find_and_read_packet_fn = fake_find_and_read_packet
+    else:
+        find_and_read_packet_fn = find_and_read_packet
 
     try:
         with Live(console=Console(), refresh_per_second=10, screen=False) as live:
             while True:
-                #packet = find_and_read_packet(ser)
-                packet = fake_find_and_read_packet()
+                
+                packet = find_and_read_packet_fn(ser=ser, verify_enable=args.verify)
+                
                 if packet is None:
                     errors += 1
                     continue
-          
+
                 total += 1
                 freq.tick()
-                
+
                 data = packet[5:-1]
-                
-                #parsed = parse_dorient(data, verify_enable=args.verify)
-                parsed = fake_parse_dorient()
+
+                parsed = parse_dorient(data, verify_enable=args.verify)
                 if logger:
                     logger.write(parsed)
 
