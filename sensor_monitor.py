@@ -84,6 +84,49 @@ class DataLogger:
         self._file.close()
 
 
+class Measurement:
+    """Класс для хранения и обработки текущих измерений, 
+    а также для отслеживания максимальных и минимальных значений каждого параметра."""
+    KEYS = (
+        "azimuth_deg", "pitch_deg", "roll_deg",
+        "acc_right", "acc_fwd", "acc_up",
+        "mag_right", "mag_fwd", "mag_up",
+    )
+    WINDOW = 20
+
+    def __init__(self):
+        self._values = {k: deque([0.0], maxlen=self.WINDOW) for k in self.KEYS}
+        self._max = dict.fromkeys(self.KEYS, 0.0)
+        self._min = dict.fromkeys(self.KEYS, 0.0)
+
+    def max_value(self, key: str) -> float:
+        return self._max[key]
+
+    def min_value(self, key: str) -> float:
+        return self._min[key]
+
+    def average_value(self, key: str) -> float:
+        vals = self._values[key]
+        return sum(vals) / len(vals) if vals else 0.0
+
+    def update(self, new_values: dict) -> None:
+        for key, value in new_values.items():
+            self._values[key].append(value)
+
+            if value > self._max[key]:
+                self._max[key] = value
+            elif value < self._min[key]:
+                self._min[key] = value
+
+    def reset(self):
+        """Сброс всех накопленных данных."""
+        for k in self.KEYS:
+            self._values[k].clear()
+            self._values[k].append(0.0)
+            self._max[k] = 0.0
+            self._min[k] = 0.0
+                
+
 def kang_to_degrees(raw: int, signed: bool = False) -> float:
     """Преобразует 16-битное значение из датчика в градусы."""
     if signed:
@@ -221,6 +264,7 @@ def show_available_ports() -> None:
 
 def create_table(
     d: dict,
+    meas: Measurement,
     freq: FrequencyEstimator,
     logger: DataLogger | None,
     total: int,
@@ -230,19 +274,21 @@ def create_table(
 
     table.add_column("Parameter", justify="left", style="cyan", width=12)
     table.add_column("Value", justify="center", width=12)
+    table.add_column("Max", justify="center", width=12)
+    table.add_column("Min", justify="center", width=12) 
     table.add_column("Unit", justify="center", style="dim", width=5)
 
-    table.add_row("Heading", f"{d['azimuth_deg']:>8.2f}", "deg")
-    table.add_row("Pitch", f"{d['pitch_deg']:>+8.2f}", "deg")
-    table.add_row("Roll", f"{d['roll_deg']:>+8.2f}", "deg")
+    table.add_row("Heading", f"{d['azimuth_deg']:>8.2f}", f"{meas.max_value('azimuth_deg'):>8.2f}", f"{meas.min_value('azimuth_deg'):>8.2f}", "deg")
+    table.add_row("Pitch", f"{d['pitch_deg']:>+8.2f}", f"{meas.max_value('pitch_deg'):>8.2f}", f"{meas.min_value('pitch_deg'):>8.2f}", "deg")
+    table.add_row("Roll", f"{d['roll_deg']:>+8.2f}", f"{meas.max_value('roll_deg'):>8.2f}", f"{meas.min_value('roll_deg'):>8.2f}", "deg")
     table.add_section()
-    table.add_row("Mag C (H)", f"{d['acc_right']:>+8.2f}", "uT")
-    table.add_row("Mag B (H)", f"{d['acc_fwd']:>+8.2f}", "uT")
-    table.add_row("Mag Z (H)", f"{d['acc_up']:>+8.2f}", "uT")
+    table.add_row("Mag C (H)", f"{d['acc_right']:>+8.2f}", f"{meas.max_value('acc_right'):>8.2f}", f"{meas.min_value('acc_right'):>8.2f}", "uT")
+    table.add_row("Mag B (H)", f"{d['acc_fwd']:>+8.2f}", f"{meas.max_value('acc_fwd'):>8.2f}", f"{meas.min_value('acc_fwd'):>8.2f}", "uT")
+    table.add_row("Mag Z (H)", f"{d['acc_up']:>+8.2f}", f"{meas.max_value('acc_up'):>8.2f}", f"{meas.min_value('acc_up'):>8.2f}", "uT")
     table.add_section()
-    table.add_row("Mag C", f"{d['mag_right']:>+8.2f}", "uT")
-    table.add_row("Mag B", f"{d['mag_fwd']:>+8.2f}", "uT")
-    table.add_row("Mag Z", f"{d['mag_up']:>+8.2f}", "uT")
+    table.add_row("Mag C", f"{d['mag_right']:>+8.2f}", f"{meas.max_value('mag_right'):>8.2f}", f"{meas.min_value('mag_right'):>8.2f}", "uT")
+    table.add_row("Mag B", f"{d['mag_fwd']:>+8.2f}", f"{meas.max_value('mag_fwd'):>8.2f}", f"{meas.min_value('mag_fwd'):>8.2f}", "uT")
+    table.add_row("Mag Z", f"{d['mag_up']:>+8.2f}", f"{meas.max_value('mag_up'):>8.2f}", f"{meas.min_value('mag_up'):>8.2f}", "uT")
     table.add_section()
     table.add_row("Freq", f"{freq.hz():>8.2f}", "Hz")
     table.add_row("Interval", f"{freq.interval_ms():>8.1f}", "ms")
@@ -266,12 +312,13 @@ def create_log_line(logger: DataLogger | None) -> Text:
 
 def create_renderable(
     d: dict,
+    meas: Measurement,
     freq: FrequencyEstimator,
     logger: DataLogger | None,
     total: int,
     errors: int,
 ) -> Group:
-    table = create_table(d, freq, logger, total, errors)
+    table = create_table(d, meas, freq, logger, total, errors)
     log_line = create_log_line(logger)
     return Group(table, log_line)
 
@@ -358,6 +405,9 @@ def main():
     else:
         find_and_read_packet_fn = find_and_read_packet
 
+
+    meas = Measurement()
+    
     try:
         with Live(console=Console(), refresh_per_second=10, screen=False) as live:
             while True:
@@ -374,10 +424,13 @@ def main():
                 data = packet[5:-1]
 
                 parsed = parse_dorient(data, verify_enable=args.verify)
+                
+                meas.update(parsed)
+                
                 if logger:
                     logger.write(parsed)
 
-                live.update(create_renderable(parsed, freq, logger, total, errors))
+                live.update(create_renderable(parsed, meas, freq, logger, total, errors))
 
     except KeyboardInterrupt:
         print("\nStopped by user.")
