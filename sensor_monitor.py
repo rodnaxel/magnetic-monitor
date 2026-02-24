@@ -94,7 +94,9 @@ class Measurement:
     )
     WINDOW = 20
 
-    def __init__(self):
+    def __init__(self, window: int = WINDOW):
+        print(f"[dim]Initializing Measurement with window size: {window}[/]")
+        self.WINDOW = window    
         self._values = {k: deque([0.0], maxlen=self.WINDOW) for k in self.KEYS}
         self._max = dict.fromkeys(self.KEYS, 0.0)
         self._min = dict.fromkeys(self.KEYS, 0.0)
@@ -405,8 +407,7 @@ def main():
     else:
         find_and_read_packet_fn = find_and_read_packet
 
-
-    meas = Measurement()
+    meas = Measurement(window=args.window)
     
     try:
         with Live(console=Console(), refresh_per_second=10, screen=False) as live:
